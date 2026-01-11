@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { Dashboard } from './pages/Dashboard';
 import { Transactions } from './pages/Transactions';
 import { Reports } from './pages/Reports';
@@ -18,6 +19,7 @@ function App() {
           <Route path="/categories" element={<Categories />} />
         </Routes>
       </Layout>
+      <OfflineIndicator />
     </BrowserRouter>
   );
 }
