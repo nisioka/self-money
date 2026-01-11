@@ -10,7 +10,7 @@
   - 開発用スクリプト（dev、build、start）を設定する
   - _Requirements: 10.1_
 
-- [ ] 1.2 (P) フロントエンドプロジェクトの初期化
+- [x] 1.2 (P) フロントエンドプロジェクトの初期化
   - React + Vite + TypeScriptプロジェクトを作成する
   - Tailwind CSS、TanStack Query、Rechartsをセットアップする
   - vite-plugin-pwaを導入しPWA基本設定を行う
