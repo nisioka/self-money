@@ -210,6 +210,12 @@ export class TransactionService {
     return existing !== null;
   }
 
+  async findByExternalId(externalId: string): Promise<Transaction | null> {
+    return this.prisma.transaction.findUnique({
+      where: { externalId },
+    });
+  }
+
   async findByMonthWithRelations(
     year: number,
     month: number,
