@@ -9,3 +9,67 @@ datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
 }
+
+model Account {
+  id                   Int           @id @default(autoincrement())
+  name                 String
+  type                 String        // BANK, CARD, SECURITIES, CASH
+  balance              Int           @default(0)
+  encryptedCredentials String?
+  credentialsIv        String?
+  credentialsAuthTag   String?
+  transactions         Transaction[]
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+}
+
+model Transaction {
+  id          Int      @id @default(autoincrement())
+  date        DateTime
+  amount      Int
+  description String
+  memo        String?
+  isManual    Boolean  @default(false)
+  externalId  String?  @unique
+  accountId   Int
+  categoryId  Int
+  account     Account  @relation(fields: [accountId], references: [id])
+  category    Category @relation(fields: [categoryId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([date])
+  @@index([accountId])
+  @@index([categoryId])
+}
+
+model Category {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique
+  isDefault    Boolean       @default(false)
+  transactions Transaction[]
+  autoRules    AutoRule[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model AutoRule {
+  id         Int      @id @default(autoincrement())
+  keyword    String   @unique
+  categoryId Int
+  category   Category @relation(fields: [categoryId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Job {
+  id              String   @id @default(cuid())
+  type            String   // SCRAPE_ALL, SCRAPE_SPECIFIC
+  status          String   @default("pending") // pending, running, completed, failed
+  targetAccountId Int?
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
