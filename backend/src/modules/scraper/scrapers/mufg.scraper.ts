@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { BaseScraper } from '../base-scraper.js';
-import type { ScrapedTransaction, DecryptedCredentials } from '../scraper.types.js';
+import type { ScrapedTransaction, DecryptedCredentials, OtpSelectors } from '../scraper.types.js';
 
 /**
  * 三菱UFJ銀行スクレイパー
@@ -18,6 +18,30 @@ export class MUFGScraper extends BaseScraper {
 
   getLoginUrl(): string {
     return MUFGScraper.LOGIN_URL;
+  }
+
+  protected override getOtpSelectors(): OtpSelectors | null {
+    return {
+      detectionSelectors: [
+        'input[name="onetimePassword"]',
+        'input[name="otp"]',
+        '#oneTimePassword',
+        'form[action*="onetimepassword"]',
+      ],
+      authMethodSelectors: {
+        TOTP: '.totp-auth, .app-auth',
+        SMS: '.sms-auth',
+        EMAIL: '.email-auth',
+      },
+      inputSelector: 'input[name="onetimePassword"], input[name="otp"], #oneTimePassword',
+      submitSelector: 'button[type="submit"], input[type="submit"]',
+    };
+  }
+
+  protected override async checkOtpError(page: Page): Promise<boolean> {
+    // Check for OTP error messages
+    const errorExists = await page.locator('.error-message, .otp-error').count() > 0;
+    return errorExists;
   }
 
   async login(page: Page, credentials: DecryptedCredentials): Promise<void> {

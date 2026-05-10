@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { BaseScraper } from '../base-scraper.js';
-import type { ScrapedTransaction, DecryptedCredentials } from '../scraper.types.js';
+import type { ScrapedTransaction, DecryptedCredentials, OtpSelectors } from '../scraper.types.js';
 
 /**
  * 楽天証券スクレイパー
@@ -18,6 +18,28 @@ export class RakutenSecuritiesScraper extends BaseScraper {
 
   getLoginUrl(): string {
     return RakutenSecuritiesScraper.LOGIN_URL;
+  }
+
+  protected override getOtpSelectors(): OtpSelectors | null {
+    return {
+      detectionSelectors: [
+        'input[name="twoFactor"]',
+        'input[name="otp"]',
+        '#twoFactorCode',
+        'form[action*="2fa"]',
+      ],
+      authMethodSelectors: {
+        TOTP: '.totp-input',
+        EMAIL: '.email-verification',
+      },
+      inputSelector: 'input[name="twoFactor"], input[name="otp"], #twoFactorCode',
+      submitSelector: 'button[type="submit"], input[type="submit"]',
+    };
+  }
+
+  protected override async checkOtpError(page: Page): Promise<boolean> {
+    const errorExists = await page.locator('.login-error, .auth-error').count() > 0;
+    return errorExists;
   }
 
   async login(page: Page, credentials: DecryptedCredentials): Promise<void> {

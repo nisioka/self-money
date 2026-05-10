@@ -27,7 +27,38 @@ export type ScrapeErrorType =
   | 'SITE_CHANGED'
   | 'NETWORK_ERROR'
   | 'TWO_FACTOR_REQUIRED'
+  | 'OTP_TIMEOUT'
+  | 'OTP_MAX_RETRIES'
   | 'NO_CREDENTIALS';
+
+/**
+ * OTP認証方式
+ */
+export type OtpAuthMethod = 'TOTP' | 'SMS' | 'EMAIL' | 'PUSH_APPROVAL';
+
+/**
+ * OTP画面検知結果
+ */
+export interface OtpDetectionResult {
+  detected: boolean;
+  authMethod: OtpAuthMethod | null;
+  otpInputSelector: string | null;
+  otpSubmitSelector: string | null;
+}
+
+/**
+ * OTPセレクター定義（各スクレイパーでオーバーライド）
+ */
+export interface OtpSelectors {
+  // OTP画面を検知するためのセレクター
+  detectionSelectors: string[];
+  // 認証方式判定用のセレクター（オプション）
+  authMethodSelectors?: Partial<Record<OtpAuthMethod, string>>;
+  // OTP入力フィールドのセレクター
+  inputSelector: string;
+  // OTP送信ボタンのセレクター
+  submitSelector: string;
+}
 
 /**
  * スクレイピングエラー

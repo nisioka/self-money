@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { BaseScraper } from '../base-scraper.js';
-import type { ScrapedTransaction, DecryptedCredentials } from '../scraper.types.js';
+import type { ScrapedTransaction, DecryptedCredentials, OtpSelectors } from '../scraper.types.js';
 
 /**
  * ポケットカードスクレイパー
@@ -18,6 +18,28 @@ export class PocketCardScraper extends BaseScraper {
 
   getLoginUrl(): string {
     return PocketCardScraper.LOGIN_URL;
+  }
+
+  protected override getOtpSelectors(): OtpSelectors | null {
+    return {
+      detectionSelectors: [
+        'input[name="authCode"]',
+        'input[name="verificationCode"]',
+        '#authCode',
+        'form[action*="verify"]',
+      ],
+      authMethodSelectors: {
+        SMS: '.sms-verification',
+        EMAIL: '.email-verification',
+      },
+      inputSelector: 'input[name="authCode"], input[name="verificationCode"], #authCode',
+      submitSelector: 'button[type="submit"], input[type="submit"]',
+    };
+  }
+
+  protected override async checkOtpError(page: Page): Promise<boolean> {
+    const errorExists = await page.locator('.error-text, .verification-error').count() > 0;
+    return errorExists;
   }
 
   async login(page: Page, credentials: DecryptedCredentials): Promise<void> {

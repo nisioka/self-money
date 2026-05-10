@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ScraperService } from './scraper.service.js';
+import { ScraperService, OtpScrapingContext } from './scraper.service.js';
 import type { AccountService } from '../accounts/account.service.js';
 import type { TransactionService } from '../transactions/transaction.service.js';
 import type { ClassifierService } from '../classifier/classifier.service.js';
@@ -8,8 +8,13 @@ import type {
   ScraperFactory,
   ScrapeResult,
   DecryptedCredentials,
+  OtpDetectionResult,
 } from './scraper.types.js';
 import type { Account } from '@prisma/client';
+import type { JobService } from '../jobs/job.service.js';
+import type { PushNotificationService } from '../push/push-notification.service.js';
+import type { TotpService } from '../totp/totp.service.js';
+import type { BaseScraper } from './base-scraper.js';
 
 describe('ScraperService', () => {
   let scraperService: ScraperService;
@@ -27,6 +32,9 @@ describe('ScraperService', () => {
     encryptedCredentials: 'encrypted',
     credentialsIv: 'iv',
     credentialsAuthTag: 'tag',
+    encryptedTotpSecret: null,
+    totpSecretIv: null,
+    totpSecretAuthTag: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -35,6 +43,14 @@ describe('ScraperService', () => {
   const mockCredentials: DecryptedCredentials = {
     username: 'testuser',
     password: 'testpass',
+  };
+
+  const mockCredentialsResult = {
+    success: true as const,
+    data: {
+      loginId: 'testuser',
+      password: 'testpass',
+    },
   };
 
   const mockScrapeResult: ScrapeResult = {
@@ -60,7 +76,7 @@ describe('ScraperService', () => {
     mockAccountService = {
       getAll: vi.fn().mockResolvedValue([createMockAccount()]),
       getById: vi.fn().mockResolvedValue({ success: true, data: createMockAccount() }),
-      getCredentials: vi.fn().mockResolvedValue(mockCredentials),
+      getCredentials: vi.fn().mockResolvedValue(mockCredentialsResult),
       updateBalance: vi.fn().mockResolvedValue(undefined),
       create: vi.fn(),
       update: vi.fn(),
@@ -101,6 +117,23 @@ describe('ScraperService', () => {
       mockClassifierService,
       mockScraperFactory
     );
+  });
+
+  // Helper function to create OTP-enabled mock scraper
+  const createOtpEnabledMockScraper = (overrides: {
+    detectOtpScreen?: () => Promise<OtpDetectionResult>;
+    submitOtpCode?: (otp: string) => void;
+    cancelOtp?: () => void;
+    isSessionActive?: () => boolean;
+    getPage?: () => unknown;
+  } = {}) => ({
+    ...mockScraper,
+    detectOtpScreen: vi.fn().mockResolvedValue({ detected: false, authMethod: null, otpInputSelector: null, otpSubmitSelector: null }),
+    submitOtpCode: vi.fn(),
+    cancelOtp: vi.fn(),
+    isSessionActive: vi.fn().mockReturnValue(true),
+    getPage: vi.fn().mockReturnValue({}),
+    ...overrides,
   });
 
   describe('scrapeAccount', () => {
@@ -221,13 +254,15 @@ describe('ScraperService', () => {
       const account2 = createMockAccount({ id: 2, name: '三井住友銀行' });
       vi.mocked(mockAccountService.getAll).mockResolvedValue([account1, account2]);
 
-      // 1つ目は成功、2つ目はスクレイパーがない
-      vi.mocked(mockScraperFactory.getScraper)
-        .mockReturnValueOnce(mockScraper)
-        .mockReturnValueOnce(null);
+      // Both accounts have scrapers, but scrapeAccount fails for account2
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(mockScraper);
       vi.mocked(mockAccountService.getById)
         .mockResolvedValueOnce({ success: true, data: account1 })
         .mockResolvedValueOnce({ success: true, data: account2 });
+      // Account 2 has no credentials
+      vi.mocked(mockAccountService.getCredentials)
+        .mockResolvedValueOnce(mockCredentialsResult)
+        .mockResolvedValueOnce({ success: false, error: { type: 'NO_CREDENTIALS' } });
 
       const result = await scraperService.scrapeAllAccounts();
 
@@ -236,23 +271,238 @@ describe('ScraperService', () => {
       expect(result.errors[0].accountId).toBe(2);
     });
 
-    it('should skip accounts without credentials', async () => {
-      const accountWithCredentials = createMockAccount({ id: 1 });
-      const accountWithoutCredentials = createMockAccount({
+    it('should skip accounts without scraper', async () => {
+      const accountWithCredentials = createMockAccount({ id: 1, name: '楽天銀行' });
+      const accountWithoutScraper = createMockAccount({
         id: 2,
         name: '現金',
         type: 'CASH',
-        encryptedCredentials: null,
       });
       vi.mocked(mockAccountService.getAll).mockResolvedValue([
         accountWithCredentials,
-        accountWithoutCredentials,
+        accountWithoutScraper,
       ]);
+
+      // Only the first account has a scraper
+      // getScraper is called twice per account (once in scrapeAllAccounts, once in scrapeAccount)
+      vi.mocked(mockScraperFactory.getScraper)
+        .mockImplementation((name: string) => {
+          return name === '楽天銀行' ? mockScraper : null;
+        });
 
       const result = await scraperService.scrapeAllAccounts();
 
-      // 認証情報がない口座はスキップ（エラーとしてカウント）
+      // Accounts without scraper are skipped (not counted as errors)
       expect(result.results.length).toBe(1);
+      expect(result.errors.length).toBe(0);
+    });
+  });
+
+  describe('scrapeAccountWithOtp', () => {
+    let mockJobService: JobService;
+    let mockPushNotificationService: PushNotificationService;
+    let mockTotpService: TotpService;
+    let otpScrapingContext: OtpScrapingContext;
+
+    beforeEach(() => {
+      mockJobService = {
+        setWaitingForOtp: vi.fn().mockResolvedValue({ id: 'job-1', status: 'waiting_for_otp' }),
+        updateStatus: vi.fn().mockResolvedValue({}),
+        incrementOtpRetryCount: vi.fn().mockResolvedValue({}),
+      } as unknown as JobService;
+
+      mockPushNotificationService = {
+        sendOtpRequiredNotification: vi.fn().mockResolvedValue({ success: true, retried: false }),
+        sendTimeoutNotification: vi.fn().mockResolvedValue({ success: true, retried: false }),
+      } as unknown as PushNotificationService;
+
+      mockTotpService = {
+        generateOtp: vi.fn().mockResolvedValue(null),
+        hasSecret: vi.fn().mockResolvedValue(false),
+      } as unknown as TotpService;
+
+      otpScrapingContext = {
+        jobId: 'job-1',
+        jobService: mockJobService,
+        pushNotificationService: mockPushNotificationService,
+        totpService: mockTotpService,
+      };
+    });
+
+    it('should detect OTP screen and trigger notification when TOTP secret is not registered', async () => {
+      // Create OTP-enabled scraper that detects OTP screen
+      const otpEnabledScraper = createOtpEnabledMockScraper({
+        detectOtpScreen: vi.fn().mockResolvedValue({
+          detected: true,
+          authMethod: 'TOTP',
+          otpInputSelector: '#otp-input',
+          otpSubmitSelector: '#otp-submit',
+        }),
+      });
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(otpEnabledScraper as unknown as Scraper);
+
+      // This will wait for OTP, but we need to trigger it to complete
+      const scrapePromise = scraperService.scrapeAccountWithOtp(1, otpScrapingContext);
+
+      // Simulate OTP submission after a short delay
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Get the callback from otp routes registry and submit OTP
+      const callbacks = scraperService.getOtpCallbacks();
+      const callback = callbacks.get('job-1');
+      expect(callback).toBeDefined();
+
+      // Submit OTP code
+      callback?.submit('123456');
+
+      // Wait for the scrape to complete (with timeout to prevent hanging)
+      const result = await Promise.race([
+        scrapePromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 100))
+      ]).catch(e => ({ success: false, error: { errorType: 'OTP_TIMEOUT', message: e.message } }));
+
+      // Verify job status was updated to waiting_for_otp
+      expect(mockJobService.setWaitingForOtp).toHaveBeenCalledWith('job-1', 'TOTP');
+
+      // Verify push notification was sent
+      expect(mockPushNotificationService.sendOtpRequiredNotification).toHaveBeenCalledWith(
+        'job-1',
+        1,
+        '楽天銀行',
+        'TOTP'
+      );
+    });
+
+    it('should auto-generate and submit OTP when TOTP secret is registered', async () => {
+      // TOTP secret is registered
+      vi.mocked(mockTotpService.generateOtp).mockResolvedValue('654321');
+      vi.mocked(mockTotpService.hasSecret).mockResolvedValue(true);
+
+      // Create OTP-enabled scraper that detects OTP screen
+      const otpEnabledScraper = createOtpEnabledMockScraper({
+        detectOtpScreen: vi.fn().mockResolvedValue({
+          detected: true,
+          authMethod: 'TOTP',
+          otpInputSelector: '#otp-input',
+          otpSubmitSelector: '#otp-submit',
+        }),
+      });
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(otpEnabledScraper as unknown as Scraper);
+
+      const result = await scraperService.scrapeAccountWithOtp(1, otpScrapingContext);
+
+      // Should NOT send push notification when TOTP is auto-generated
+      expect(mockPushNotificationService.sendOtpRequiredNotification).not.toHaveBeenCalled();
+
+      // Should auto-submit OTP
+      expect(otpEnabledScraper.submitOtpCode).toHaveBeenCalledWith('654321');
+    });
+
+    it('should not trigger OTP flow when no OTP screen is detected', async () => {
+      // Create scraper that does not detect OTP screen
+      const noOtpScraper = createOtpEnabledMockScraper({
+        detectOtpScreen: vi.fn().mockResolvedValue({
+          detected: false,
+          authMethod: null,
+          otpInputSelector: null,
+          otpSubmitSelector: null,
+        }),
+      });
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(noOtpScraper as unknown as Scraper);
+
+      const result = await scraperService.scrapeAccountWithOtp(1, otpScrapingContext);
+
+      expect(result.success).toBe(true);
+      expect(mockJobService.setWaitingForOtp).not.toHaveBeenCalled();
+      expect(mockPushNotificationService.sendOtpRequiredNotification).not.toHaveBeenCalled();
+    });
+
+    it('should register OTP callback and remove it after OTP submission', async () => {
+      const otpEnabledScraper = createOtpEnabledMockScraper({
+        detectOtpScreen: vi.fn().mockResolvedValue({
+          detected: true,
+          authMethod: 'SMS',
+          otpInputSelector: '#otp-input',
+          otpSubmitSelector: '#otp-submit',
+        }),
+      });
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(otpEnabledScraper as unknown as Scraper);
+
+      const scrapePromise = scraperService.scrapeAccountWithOtp(1, otpScrapingContext);
+
+      // Wait for callback to be registered
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Verify callback is registered
+      const callbacks = scraperService.getOtpCallbacks();
+      expect(callbacks.has('job-1')).toBe(true);
+
+      // Submit OTP
+      callbacks.get('job-1')?.submit('123456');
+
+      // Wait for completion
+      await Promise.race([
+        scrapePromise,
+        new Promise(resolve => setTimeout(resolve, 100))
+      ]);
+
+      // Callback should be removed after completion
+      expect(callbacks.has('job-1')).toBe(false);
+    });
+
+    it('should handle OTP cancellation', async () => {
+      const otpEnabledScraper = createOtpEnabledMockScraper({
+        detectOtpScreen: vi.fn().mockResolvedValue({
+          detected: true,
+          authMethod: 'TOTP',
+          otpInputSelector: '#otp-input',
+          otpSubmitSelector: '#otp-submit',
+        }),
+      });
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(otpEnabledScraper as unknown as Scraper);
+
+      const scrapePromise = scraperService.scrapeAccountWithOtp(1, otpScrapingContext);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Cancel OTP
+      const callbacks = scraperService.getOtpCallbacks();
+      callbacks.get('job-1')?.cancel();
+
+      const result = await scrapePromise;
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.errorType).toBe('TWO_FACTOR_REQUIRED');
+      }
+    });
+
+    it('should resume scraping after successful OTP submission', async () => {
+      const otpEnabledScraper = createOtpEnabledMockScraper({
+        detectOtpScreen: vi.fn().mockResolvedValue({
+          detected: true,
+          authMethod: 'TOTP',
+          otpInputSelector: '#otp-input',
+          otpSubmitSelector: '#otp-submit',
+        }),
+      });
+      vi.mocked(mockScraperFactory.getScraper).mockReturnValue(otpEnabledScraper as unknown as Scraper);
+
+      const scrapePromise = scraperService.scrapeAccountWithOtp(1, otpScrapingContext);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Submit OTP
+      const callbacks = scraperService.getOtpCallbacks();
+      callbacks.get('job-1')?.submit('123456');
+
+      const result = await Promise.race([
+        scrapePromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 200))
+      ]).catch(() => ({ success: false, error: { errorType: 'OTP_TIMEOUT', message: 'Timeout' } }));
+
+      // After OTP, job status should be updated to running
+      expect(mockJobService.updateStatus).toHaveBeenCalledWith('job-1', 'running');
     });
   });
 });
