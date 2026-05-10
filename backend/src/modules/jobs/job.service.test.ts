@@ -328,8 +328,8 @@ describe('JobService', () => {
       expect(staleAfter?.errorMessage).toBe('OTP timeout');
     });
 
-    it('should be a no-op when there are no stale jobs', async () => {
-      await expect(service.recoverStaleOtpJobs()).resolves.toBeUndefined();
+    it('should return 0 when there are no stale jobs', async () => {
+      await expect(service.recoverStaleOtpJobs()).resolves.toBe(0);
     });
   });
 

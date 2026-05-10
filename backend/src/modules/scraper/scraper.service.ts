@@ -10,7 +10,6 @@ import type {
   ScrapeAccountError,
   ScrapeAllResult,
   ScrapedTransaction,
-  OtpDetectionResult,
 } from './scraper.types.js';
 import type { BaseScraper } from './base-scraper.js';
 import { otpCallbacks } from './otp.routes.js';
@@ -377,11 +376,13 @@ export class ScraperService {
   /**
    * OTP処理を含むスクレイピングを実行する内部メソッド
    *
-   * このメソッドは以下のフローを実行します:
-   * 1. スクレイパーのdetectOtpScreenを呼び出してOTP検知を行う
-   * 2. OTPが検知された場合、TOTPシークレットがあれば自動生成
-   * 3. TOTPシークレットがない場合、Push通知を送信してユーザー入力を待機
-   * 4. OTPが入力されたら、スクレイパーに渡してスクレイピングを再開
+   * 設計のポイント:
+   * - OTP の検知・入力・送信は `BaseScraper.scrapeWithOtpCallback` に委譲し、
+   *   実ブラウザセッションを保持したまま処理する（再ログイン不要）。
+   * - `waitForOtp(timeoutMs)` 内蔵の 5 分タイムアウトにより、ユーザーが応答しない
+   *   ケースでも Promise が永続的に保留されることはなく、メモリリークも回避できる。
+   * - TOTP シークレット登録済みの場合は callback 内で `submitOtpCode` を即座に発火し、
+   *   外部からの Push 通知を伴わずに自動継続する。
    */
   private async scrapeWithOtpHandling(
     scraper: BaseScraper,
@@ -392,90 +393,51 @@ export class ScraperService {
   ): Promise<ScrapeResult> {
     const { jobId, jobService, pushNotificationService, totpService } = context;
 
-    // For OTP-enabled scrapers, use detectOtpScreen if available
-    const detectOtpScreen = (scraper as any).detectOtpScreen;
-    if (typeof detectOtpScreen !== 'function') {
-      // Scraper doesn't support OTP detection, use normal scraping
+    if (typeof scraper.scrapeWithOtpCallback !== 'function') {
       return scraper.scrape(credentials);
     }
 
-    // Check OTP detection first (mock-friendly approach)
-    const otpDetection: OtpDetectionResult = await detectOtpScreen.call(scraper, null);
+    return scraper.scrapeWithOtpCallback(credentials, async (detection) => {
+      console.log(
+        `[SCRAPER_SERVICE] OTP detected for account ${accountName}, method: ${detection.authMethod}`
+      );
 
-    if (!otpDetection.detected) {
-      // No OTP required, continue with normal scraping
-      return scraper.scrape(credentials);
-    }
-
-    // OTP detected - handle it
-    console.log(`[SCRAPER_SERVICE] OTP detected for account ${accountName}, method: ${otpDetection.authMethod}`);
-
-    // Check if TOTP secret is registered and auth method is TOTP
-    if (otpDetection.authMethod === 'TOTP') {
-      const autoOtp = await totpService.generateOtp(accountId);
-      if (autoOtp) {
-        // Auto-submit TOTP
-        console.log(`[SCRAPER_SERVICE] Auto-generating TOTP for account ${accountName}`);
-        scraper.submitOtpCode(autoOtp);
-
-        // Update job status to running
-        await jobService.updateStatus(jobId, 'running');
-
-        // Execute scraping after auto OTP submission
-        return scraper.scrape(credentials);
+      // 1) TOTP シークレット登録済みなら自動入力で完結する
+      if (detection.authMethod === 'TOTP') {
+        const autoOtp = await totpService.generateOtp(accountId);
+        if (autoOtp) {
+          console.log(`[SCRAPER_SERVICE] Auto-generating TOTP for account ${accountName}`);
+          scraper.submitOtpCode(autoOtp);
+          return;
+        }
       }
-    }
 
-    // No TOTP registered or auth method is not TOTP - need manual input
-    // Update job status to waiting_for_otp
-    await jobService.setWaitingForOtp(jobId, otpDetection.authMethod as OtpAuthMethod);
+      // 2) 手動入力が必要 — ジョブを待機状態にして Push 通知を送る
+      await jobService.setWaitingForOtp(jobId, detection.authMethod as OtpAuthMethod);
+      await pushNotificationService.sendOtpRequiredNotification(
+        jobId,
+        accountId,
+        accountName,
+        detection.authMethod as OtpAuthMethod
+      );
 
-    // Send push notification
-    await pushNotificationService.sendOtpRequiredNotification(
-      jobId,
-      accountId,
-      accountName,
-      otpDetection.authMethod as OtpAuthMethod
-    );
-
-    // Register OTP callback and wait for user input
-    return new Promise<ScrapeResult>((resolve, reject) => {
-      const callback = {
-        submit: async (otp: string) => {
+      // 3) フロントエンドからの OTP 入力を受け取るコールバックを登録
+      otpCallbacks.set(jobId, {
+        submit: (otp: string) => {
           console.log(`[SCRAPER_SERVICE] OTP received for job ${jobId}`);
           scraper.submitOtpCode(otp);
-
-          // Update job status back to running
-          try {
-            await jobService.updateStatus(jobId, 'running');
-          } catch (error) {
-            console.error('[SCRAPER_SERVICE] Failed to update job status:', error);
-          }
-
-          // Clean up callback
           otpCallbacks.delete(jobId);
-
-          // Execute scraping after OTP submission
-          try {
-            const result = await scraper.scrape(credentials);
-            resolve(result);
-          } catch (error) {
-            reject(error);
-          }
+          // running への戻し更新は失敗してもスクレイピング継続を妨げない
+          jobService.updateStatus(jobId, 'running').catch((error) => {
+            console.error('[SCRAPER_SERVICE] Failed to update job status:', error);
+          });
         },
         cancel: () => {
           console.log(`[SCRAPER_SERVICE] OTP cancelled for job ${jobId}`);
           scraper.cancelOtp();
-
-          // Clean up callback
           otpCallbacks.delete(jobId);
-
-          reject(new Error('OTP_CANCELLED'));
         },
-      };
-
-      // Register callback
-      otpCallbacks.set(jobId, callback);
+      });
     });
   }
 

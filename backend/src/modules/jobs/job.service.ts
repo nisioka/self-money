@@ -106,20 +106,26 @@ export class JobService {
     });
   }
 
-  async recoverStaleOtpJobs(): Promise<void> {
-    const staleJobs = await this.prisma.job.findMany({
+  async recoverStaleOtpJobs(): Promise<number> {
+    // updateMany で 1 リクエストにまとめる。失効した OTP 待機ジョブが
+    // 大量にある場合でも DB ラウンドトリップは 1 回で済む。
+    const result = await this.prisma.job.updateMany({
       where: {
         status: 'waiting_for_otp',
         otpRequestedAt: {
           lt: new Date(Date.now() - OTP_TIMEOUT_MS),
         },
       },
+      data: {
+        status: 'failed',
+        errorMessage: 'OTP timeout',
+      },
     });
 
-    for (const job of staleJobs) {
-      console.log(`[JOB_SERVICE] Marking stale OTP job as failed: ${job.id}`);
-      await this.updateStatus(job.id, 'failed', 'OTP timeout');
+    if (result.count > 0) {
+      console.log(`[JOB_SERVICE] Recovered ${result.count} stale OTP jobs`);
     }
+    return result.count;
   }
 
   isOtpTimedOut(job: Job): boolean {

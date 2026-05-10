@@ -179,6 +179,9 @@ export abstract class BaseScraper implements Scraper {
 
   /**
    * OTP画面を検知する
+   *
+   * Playwrightの推奨に従い、ElementHandle (`page.$`) ではなく Locator API を使用する。
+   * Locator は自動待機とリトライを内蔵しており、SPA でDOMが遅延して挿入されるケースでも安定する。
    */
   protected async detectOtpScreen(page: Page): Promise<OtpDetectionResult> {
     const selectors = this.getOtpSelectors();
@@ -191,18 +194,18 @@ export abstract class BaseScraper implements Scraper {
       };
     }
 
-    // 検知セレクターをチェック
     for (const selector of selectors.detectionSelectors) {
-      const element = await page.$(selector);
-      if (element) {
-        // 認証方式を判定
-        let authMethod: OtpAuthMethod = 'TOTP'; // デフォルト
+      // Locator + count で存在チェック。`isVisible` は要素が無いと例外を投げる派生があるため
+      // count を採用して NotFound を 0 に正規化する。
+      const count = await page.locator(selector).count();
+      if (count > 0) {
+        let authMethod: OtpAuthMethod = 'TOTP';
         if (selectors.authMethodSelectors) {
           for (const [method, methodSelector] of Object.entries(
             selectors.authMethodSelectors
           )) {
-            const methodElement = await page.$(methodSelector);
-            if (methodElement) {
+            const methodCount = await page.locator(methodSelector).count();
+            if (methodCount > 0) {
               authMethod = method as OtpAuthMethod;
               break;
             }
@@ -326,5 +329,71 @@ export abstract class BaseScraper implements Scraper {
    */
   public isSessionActive(): boolean {
     return this.browser !== null && this.page !== null;
+  }
+
+  /**
+   * OTP対応のスクレイピングを実行する。
+   *
+   * 通常の `scrape()` は login → fetchTransactions → fetchBalance を直列に実行するが、
+   * このメソッドは login 完了直後に OTP 画面を検知し、検知時のみ:
+   *   1. `onOtpRequired(detection)` でオーケストレーター (ScraperService) に通知
+   *   2. `waitForOtp(timeoutMs)` で OTP 受信を待機（5分タイムアウト内蔵）
+   *   3. 受信した OTP を金融機関サイトに `submitOtp()` で送信
+   *   4. その後の取引・残高取得は **同一ブラウザセッション** で継続
+   *
+   * これにより、OTP 入力後にスクレイピングが最初からやり直されることを防ぎ、
+   * `onOtpRequired` のクロージャがブラウザセッションを抱え込んでメモリリークを起こす問題も解消する。
+   */
+  async scrapeWithOtpCallback(
+    credentials: DecryptedCredentials,
+    onOtpRequired: (detection: OtpDetectionResult) => Promise<void>,
+    otpTimeoutMs: number = OTP_TIMEOUT_MS
+  ): Promise<ScrapeResult> {
+    try {
+      this.browser = await chromium.launch({ headless: true });
+      this.page = await this.browser.newPage();
+
+      await this.page.goto(this.getLoginUrl(), {
+        waitUntil: 'domcontentloaded',
+      });
+
+      await this.login(this.page, credentials);
+
+      const detection = await this.detectOtpScreen(this.page);
+      if (detection.detected) {
+        await onOtpRequired(detection);
+
+        const waitResult = await this.waitForOtp(otpTimeoutMs);
+        if (waitResult.timedOut) {
+          throw new Error('OTP_TIMEOUT');
+        }
+        if (!waitResult.success || !waitResult.otp) {
+          throw new Error('OTP_CANCELLED');
+        }
+
+        if (!detection.otpInputSelector || !detection.otpSubmitSelector) {
+          throw new Error('OTP_SELECTOR_MISSING');
+        }
+
+        const submitted = await this.submitOtp(this.page, waitResult.otp, {
+          input: detection.otpInputSelector,
+          submit: detection.otpSubmitSelector,
+        });
+        if (!submitted) {
+          throw new Error('OTP_REJECTED');
+        }
+      }
+
+      const transactions = await this.fetchTransactions(this.page);
+      const balance = await this.fetchBalance(this.page);
+
+      return {
+        accountId: 0,
+        transactions,
+        balance,
+      };
+    } finally {
+      await this.cleanup();
+    }
   }
 }
