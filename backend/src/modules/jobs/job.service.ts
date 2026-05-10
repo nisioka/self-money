@@ -1,13 +1,17 @@
 import type { PrismaClient, Job } from '@prisma/client';
 
 export type JobType = 'SCRAPE_ALL' | 'SCRAPE_SPECIFIC';
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'waiting_for_otp';
+export type OtpAuthMethod = 'TOTP' | 'SMS' | 'EMAIL' | 'PUSH_APPROVAL';
 
 export type JobError = { type: 'NOT_FOUND' };
 
 export type Result<T, E> =
   | { success: true; data: T }
   | { success: false; error: E };
+
+// OTP timeout in milliseconds (5 minutes)
+const OTP_TIMEOUT_MS = 5 * 60 * 1000;
 
 export class JobService {
   constructor(private readonly prisma: PrismaClient) {}
@@ -67,5 +71,70 @@ export class JobService {
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
+  }
+
+  // OTP-related methods
+
+  async setWaitingForOtp(
+    id: string,
+    authMethod: OtpAuthMethod
+  ): Promise<Job> {
+    return this.prisma.job.update({
+      where: { id },
+      data: {
+        status: 'waiting_for_otp',
+        otpAuthMethod: authMethod,
+        otpRequestedAt: new Date(),
+        otpRetryCount: 0,
+      },
+    });
+  }
+
+  async incrementOtpRetryCount(id: string): Promise<Job> {
+    return this.prisma.job.update({
+      where: { id },
+      data: {
+        otpRetryCount: { increment: 1 },
+      },
+    });
+  }
+
+  async getWaitingForOtpJobs(): Promise<Job[]> {
+    return this.prisma.job.findMany({
+      where: { status: 'waiting_for_otp' },
+      orderBy: { otpRequestedAt: 'asc' },
+    });
+  }
+
+  async recoverStaleOtpJobs(): Promise<void> {
+    const staleJobs = await this.prisma.job.findMany({
+      where: {
+        status: 'waiting_for_otp',
+        otpRequestedAt: {
+          lt: new Date(Date.now() - OTP_TIMEOUT_MS),
+        },
+      },
+    });
+
+    for (const job of staleJobs) {
+      console.log(`[JOB_SERVICE] Marking stale OTP job as failed: ${job.id}`);
+      await this.updateStatus(job.id, 'failed', 'OTP timeout');
+    }
+  }
+
+  isOtpTimedOut(job: Job): boolean {
+    if (job.status !== 'waiting_for_otp' || !job.otpRequestedAt) {
+      return false;
+    }
+    return Date.now() - job.otpRequestedAt.getTime() > OTP_TIMEOUT_MS;
+  }
+
+  getRemainingOtpSeconds(job: Job): number {
+    if (job.status !== 'waiting_for_otp' || !job.otpRequestedAt) {
+      return 0;
+    }
+    const elapsed = Date.now() - job.otpRequestedAt.getTime();
+    const remaining = OTP_TIMEOUT_MS - elapsed;
+    return Math.max(0, Math.floor(remaining / 1000));
   }
 }
