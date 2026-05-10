@@ -219,4 +219,170 @@ describe('JobService', () => {
       expect(recent).toEqual([]);
     });
   });
+
+  describe('setWaitingForOtp', () => {
+    it('should transition status to waiting_for_otp with auth method and timestamp', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      await service.updateStatus(job.id, 'running');
+
+      const before = Date.now();
+      const updated = await service.setWaitingForOtp(job.id, 'TOTP');
+      const after = Date.now();
+
+      expect(updated.status).toBe('waiting_for_otp');
+      expect(updated.otpAuthMethod).toBe('TOTP');
+      expect(updated.otpRequestedAt).not.toBeNull();
+      expect(updated.otpRequestedAt!.getTime()).toBeGreaterThanOrEqual(before);
+      expect(updated.otpRequestedAt!.getTime()).toBeLessThanOrEqual(after);
+      expect(updated.otpRetryCount).toBe(0);
+    });
+
+    it('should support all OTP auth methods', async () => {
+      for (const method of ['TOTP', 'SMS', 'EMAIL', 'PUSH_APPROVAL'] as const) {
+        const job = await service.create('SCRAPE_ALL');
+        const updated = await service.setWaitingForOtp(job.id, method);
+        expect(updated.otpAuthMethod).toBe(method);
+      }
+    });
+
+    it('should reset otpRetryCount to 0 even after previous attempts', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(job.id, 'TOTP');
+      await service.incrementOtpRetryCount(job.id);
+      await service.incrementOtpRetryCount(job.id);
+
+      const updated = await service.setWaitingForOtp(job.id, 'TOTP');
+      expect(updated.otpRetryCount).toBe(0);
+    });
+  });
+
+  describe('incrementOtpRetryCount', () => {
+    it('should increment retry count by 1', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(job.id, 'TOTP');
+
+      const after1 = await service.incrementOtpRetryCount(job.id);
+      expect(after1.otpRetryCount).toBe(1);
+
+      const after2 = await service.incrementOtpRetryCount(job.id);
+      expect(after2.otpRetryCount).toBe(2);
+    });
+  });
+
+  describe('getWaitingForOtpJobs', () => {
+    it('should return only jobs with waiting_for_otp status', async () => {
+      const j1 = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(j1.id, 'TOTP');
+      const j2 = await service.create('SCRAPE_ALL');
+      await service.updateStatus(j2.id, 'running');
+      const j3 = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(j3.id, 'SMS');
+
+      const result = await service.getWaitingForOtpJobs();
+
+      expect(result.map((j) => j.id).sort()).toEqual([j1.id, j3.id].sort());
+    });
+
+    it('should order by otpRequestedAt ascending (oldest first)', async () => {
+      const j1 = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(j1.id, 'TOTP');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const j2 = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(j2.id, 'TOTP');
+
+      const result = await service.getWaitingForOtpJobs();
+
+      expect(result).toHaveLength(2);
+      expect(result[0]?.id).toBe(j1.id);
+      expect(result[1]?.id).toBe(j2.id);
+    });
+
+    it('should return empty array when no jobs are waiting for OTP', async () => {
+      const result = await service.getWaitingForOtpJobs();
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('recoverStaleOtpJobs', () => {
+    it('should mark waiting_for_otp jobs older than 5 minutes as failed', async () => {
+      const fresh = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(fresh.id, 'TOTP');
+
+      const stale = await service.create('SCRAPE_ALL');
+      // Manually backdate the otpRequestedAt to 6 minutes ago
+      await prisma.job.update({
+        where: { id: stale.id },
+        data: {
+          status: 'waiting_for_otp',
+          otpAuthMethod: 'TOTP',
+          otpRequestedAt: new Date(Date.now() - 6 * 60 * 1000),
+        },
+      });
+
+      await service.recoverStaleOtpJobs();
+
+      const freshAfter = await prisma.job.findUnique({ where: { id: fresh.id } });
+      const staleAfter = await prisma.job.findUnique({ where: { id: stale.id } });
+      expect(freshAfter?.status).toBe('waiting_for_otp');
+      expect(staleAfter?.status).toBe('failed');
+      expect(staleAfter?.errorMessage).toBe('OTP timeout');
+    });
+
+    it('should return 0 when there are no stale jobs', async () => {
+      await expect(service.recoverStaleOtpJobs()).resolves.toBe(0);
+    });
+  });
+
+  describe('isOtpTimedOut', () => {
+    it('should return false for fresh waiting_for_otp jobs', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      const waiting = await service.setWaitingForOtp(job.id, 'TOTP');
+
+      expect(service.isOtpTimedOut(waiting)).toBe(false);
+    });
+
+    it('should return true for jobs older than 5 minutes', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(job.id, 'TOTP');
+      const stale = await prisma.job.update({
+        where: { id: job.id },
+        data: { otpRequestedAt: new Date(Date.now() - 6 * 60 * 1000) },
+      });
+
+      expect(service.isOtpTimedOut(stale)).toBe(true);
+    });
+
+    it('should return false for non-waiting jobs', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      const running = await service.updateStatus(job.id, 'running');
+      expect(service.isOtpTimedOut(running)).toBe(false);
+    });
+  });
+
+  describe('getRemainingOtpSeconds', () => {
+    it('should return ~300 seconds for a freshly-requested OTP', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      const waiting = await service.setWaitingForOtp(job.id, 'TOTP');
+
+      const remaining = service.getRemainingOtpSeconds(waiting);
+      expect(remaining).toBeGreaterThan(295);
+      expect(remaining).toBeLessThanOrEqual(300);
+    });
+
+    it('should return 0 for jobs not in waiting_for_otp', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      expect(service.getRemainingOtpSeconds(job)).toBe(0);
+    });
+
+    it('should return 0 for timed-out jobs', async () => {
+      const job = await service.create('SCRAPE_ALL');
+      await service.setWaitingForOtp(job.id, 'TOTP');
+      const stale = await prisma.job.update({
+        where: { id: job.id },
+        data: { otpRequestedAt: new Date(Date.now() - 6 * 60 * 1000) },
+      });
+
+      expect(service.getRemainingOtpSeconds(stale)).toBe(0);
+    });
+  });
 });

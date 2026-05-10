@@ -9,7 +9,7 @@ const VALID_ACCOUNT_TYPES = ['BANK', 'CARD', 'SECURITIES', 'CASH'] as const;
 const credentialsSchema = z.object({
   loginId: z.string().min(1),
   password: z.string().min(1),
-  additionalFields: z.record(z.string()).optional(),
+  additionalFields: z.record(z.string(), z.string()).optional(),
 });
 
 const createAccountSchema = z.object({
@@ -79,10 +79,18 @@ export const accountRoutes: FastifyPluginAsync<AccountRoutesOptions> = async (
       });
     }
 
+    const credentials = parseResult.data.credentials
+      ? {
+          loginId: parseResult.data.credentials.loginId,
+          password: parseResult.data.credentials.password,
+          additionalFields: parseResult.data.credentials.additionalFields as Record<string, string> | undefined,
+        }
+      : undefined;
+
     const result = await service.create({
       name: parseResult.data.name,
       type: parseResult.data.type as AccountType,
-      credentials: parseResult.data.credentials,
+      credentials,
       initialBalance: parseResult.data.initialBalance,
     });
 
@@ -121,9 +129,17 @@ export const accountRoutes: FastifyPluginAsync<AccountRoutesOptions> = async (
         });
       }
 
+      const updateCredentials = bodyResult.data.credentials
+        ? {
+            loginId: bodyResult.data.credentials.loginId,
+            password: bodyResult.data.credentials.password,
+            additionalFields: bodyResult.data.credentials.additionalFields as Record<string, string> | undefined,
+          }
+        : undefined;
+
       const result = await service.update(idResult.data.id, {
         name: bodyResult.data.name,
-        credentials: bodyResult.data.credentials,
+        credentials: updateCredentials,
       });
 
       if (!result.success) {

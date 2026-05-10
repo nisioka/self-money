@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { BaseScraper } from '../base-scraper.js';
-import type { ScrapedTransaction, DecryptedCredentials } from '../scraper.types.js';
+import type { ScrapedTransaction, DecryptedCredentials, OtpSelectors } from '../scraper.types.js';
 
 /**
  * 楽天銀行スクレイパー
@@ -19,6 +19,29 @@ export class RakutenBankScraper extends BaseScraper {
 
   getLoginUrl(): string {
     return RakutenBankScraper.LOGIN_URL;
+  }
+
+  protected override getOtpSelectors(): OtpSelectors | null {
+    return {
+      detectionSelectors: [
+        'input[name="LOGIN:ONE_TIME_PASSWORD"]',
+        'input[name="AUTHCODE"]',
+        '#oneTimePassword',
+        'form[action*="otp"]',
+      ],
+      authMethodSelectors: {
+        TOTP: '.authenticator-otp',
+        SMS: '.sms-otp',
+        EMAIL: '.email-otp',
+      },
+      inputSelector: 'input[name="LOGIN:ONE_TIME_PASSWORD"], input[name="AUTHCODE"], #oneTimePassword',
+      submitSelector: 'input[type="submit"], button[type="submit"]',
+    };
+  }
+
+  protected override async checkOtpError(page: Page): Promise<boolean> {
+    const errorExists = await page.locator('.error-message, .otp-error').count() > 0;
+    return errorExists;
   }
 
   async login(page: Page, credentials: DecryptedCredentials): Promise<void> {

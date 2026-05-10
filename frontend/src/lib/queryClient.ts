@@ -21,6 +21,7 @@ export const queryKeys = {
   account: (id: number) => ['account', id] as const,
   jobs: () => ['jobs'] as const,
   job: (id: string) => ['job', id] as const,
+  totpStatus: (accountId: number) => ['totp-status', accountId] as const,
   analytics: {
     monthly: (year: number, month: number) => ['analytics', 'monthly', year, month] as const,
     categories: (year: number, month: number) => ['analytics', 'categories', year, month] as const,

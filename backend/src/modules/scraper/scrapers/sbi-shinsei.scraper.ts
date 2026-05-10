@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { BaseScraper } from '../base-scraper.js';
-import type { ScrapedTransaction, DecryptedCredentials } from '../scraper.types.js';
+import type { ScrapedTransaction, DecryptedCredentials, OtpSelectors } from '../scraper.types.js';
 
 /**
  * SBI新生銀行スクレイパー
@@ -18,6 +18,28 @@ export class SBIShinseiScraper extends BaseScraper {
 
   getLoginUrl(): string {
     return SBIShinseiScraper.LOGIN_URL;
+  }
+
+  protected override getOtpSelectors(): OtpSelectors | null {
+    return {
+      detectionSelectors: [
+        'input[name="securityCode"]',
+        'input[name="authCode"]',
+        '#securityCode',
+        'form[action*="security"]',
+      ],
+      authMethodSelectors: {
+        SMS: '.sms-code',
+        TOTP: '.totp-code, .authenticator',
+      },
+      inputSelector: 'input[name="securityCode"], input[name="authCode"], #securityCode',
+      submitSelector: 'button[type="submit"], input[type="submit"]',
+    };
+  }
+
+  protected override async checkOtpError(page: Page): Promise<boolean> {
+    const errorExists = await page.locator('.login-error, .security-error').count() > 0;
+    return errorExists;
   }
 
   async login(page: Page, credentials: DecryptedCredentials): Promise<void> {

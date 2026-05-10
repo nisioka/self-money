@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { BaseScraper } from '../base-scraper.js';
-import type { ScrapedTransaction, DecryptedCredentials } from '../scraper.types.js';
+import type { ScrapedTransaction, DecryptedCredentials, OtpSelectors } from '../scraper.types.js';
 
 /**
  * 三井住友銀行スクレイパー
@@ -18,6 +18,28 @@ export class SMBCScraper extends BaseScraper {
 
   getLoginUrl(): string {
     return SMBCScraper.LOGIN_URL;
+  }
+
+  protected override getOtpSelectors(): OtpSelectors | null {
+    return {
+      detectionSelectors: [
+        'input[name="oneTimePass"]',
+        'input[name="otp"]',
+        '#oneTimePass',
+        'form[action*="onetimepass"]',
+      ],
+      authMethodSelectors: {
+        SMS: '.sms-verification',
+        TOTP: '.totp-verification, .app-verification',
+      },
+      inputSelector: 'input[name="oneTimePass"], input[name="otp"], #oneTimePass',
+      submitSelector: 'input[type="submit"], button[type="submit"]',
+    };
+  }
+
+  protected override async checkOtpError(page: Page): Promise<boolean> {
+    const errorExists = await page.locator('.error, .otp-error').count() > 0;
+    return errorExists;
   }
 
   async login(page: Page, credentials: DecryptedCredentials): Promise<void> {
