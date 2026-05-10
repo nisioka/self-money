@@ -18,6 +18,9 @@ model Account {
   encryptedCredentials String?
   credentialsIv        String?
   credentialsAuthTag   String?
+  encryptedTotpSecret  String?
+  totpSecretIv         String?
+  totpSecretAuthTag    String?
   transactions         Transaction[]
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
@@ -63,13 +66,25 @@ model AutoRule {
 }
 
 model Job {
-  id              String   @id @default(cuid())
-  type            String   // SCRAPE_ALL, SCRAPE_SPECIFIC
-  status          String   @default("pending") // pending, running, completed, failed
+  id              String    @id @default(cuid())
+  type            String    // SCRAPE_ALL, SCRAPE_SPECIFIC
+  status          String    @default("pending") // pending, running, completed, failed, waiting_for_otp
   targetAccountId Int?
   errorMessage    String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  otpAuthMethod   String?   // TOTP, SMS, EMAIL, PUSH_APPROVAL
+  otpRequestedAt  DateTime?
+  otpRetryCount   Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@index([status, createdAt])
+}
+
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  endpoint  String   @unique
+  p256dhKey String
+  authKey   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
