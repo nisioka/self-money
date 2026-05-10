@@ -11,6 +11,7 @@ const navItems = [
   { path: '/reports', label: 'レポート' },
   { path: '/accounts', label: '口座' },
   { path: '/categories', label: '費目' },
+  { path: '/settings', label: '設定' },
 ];
 
 export function Layout({ children }: LayoutProps) {

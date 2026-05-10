@@ -35,6 +35,8 @@ const getJobStatusLabel = (status: string): string => {
       return '完了';
     case 'failed':
       return '失敗';
+    case 'waiting_for_otp':
+      return 'OTP待機中';
     default:
       return status;
   }
@@ -50,9 +52,17 @@ const getJobStatusColor = (status: string): string => {
       return 'bg-green-100 text-green-800';
     case 'failed':
       return 'bg-red-100 text-red-800';
+    case 'waiting_for_otp':
+      return 'bg-purple-100 text-purple-800';
     default:
       return 'bg-gray-100 text-gray-800';
   }
+};
+
+const isOtpError = (errorMessage: string | null): boolean => {
+  if (!errorMessage) return false;
+  const otpKeywords = ['OTP', 'otp', 'timeout', 'タイムアウト', 'retry', 'リトライ', '認証'];
+  return otpKeywords.some((keyword) => errorMessage.includes(keyword));
 };
 
 export function Dashboard() {
@@ -76,7 +86,7 @@ export function Dashboard() {
     queryFn: () => apiGet<Job[]>('/jobs?limit=5'),
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (data?.some((job) => job.status === 'pending' || job.status === 'running')) {
+      if (data?.some((job) => job.status === 'pending' || job.status === 'running' || job.status === 'waiting_for_otp')) {
         return 3000;
       }
       return false;
@@ -91,7 +101,7 @@ export function Dashboard() {
   });
 
   const totalBalance = accounts.reduce((sum, acc) => sum + acc.balance, 0);
-  const isJobRunning = jobs.some((job) => job.status === 'pending' || job.status === 'running');
+  const isJobRunning = jobs.some((job) => job.status === 'pending' || job.status === 'running' || job.status === 'waiting_for_otp');
 
   return (
     <div className="space-y-6">
@@ -164,12 +174,21 @@ export function Dashboard() {
             <div className="space-y-3">
               {jobs.map((job) => (
                 <div key={job.id} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
-                  <div>
+                  <div className="flex-1">
                     <p className="text-sm text-gray-600">
                       {new Date(job.createdAt).toLocaleString('ja-JP')}
                     </p>
                     {job.errorMessage && (
-                      <p className="text-xs text-red-600 mt-1">{job.errorMessage}</p>
+                      <p className={`text-xs mt-1 ${isOtpError(job.errorMessage) ? 'text-purple-600' : 'text-red-600'}`}>
+                        {isOtpError(job.errorMessage) && (
+                          <span className="inline-flex items-center mr-1">
+                            <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                            </svg>
+                          </span>
+                        )}
+                        {job.errorMessage}
+                      </p>
                     )}
                   </div>
                   <span className={`px-2 py-1 rounded text-xs font-medium ${getJobStatusColor(job.status)}`}>

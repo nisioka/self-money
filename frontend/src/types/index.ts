@@ -69,9 +69,14 @@ export interface UpdateTransactionInput {
   memo?: string;
 }
 
+// Account TOTP types
+export interface TotpStatusResponse {
+  hasSecret: boolean;
+}
+
 // Job types
 export type JobType = 'SCRAPE_ALL' | 'SCRAPE_SPECIFIC';
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'waiting_for_otp';
 
 export interface Job {
   id: string;

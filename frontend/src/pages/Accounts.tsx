@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost, apiPatch, apiDelete } from '../lib/api';
 import { queryKeys } from '../lib/queryClient';
+import { TotpSettings } from '../components/TotpSettings';
 import type { Account, AccountType, CreateAccountInput, UpdateAccountInput } from '../types';
 
 const formatCurrency = (amount: number): string => {
@@ -132,7 +133,10 @@ function AccountForm({ account, onSubmit, onCancel }: AccountFormProps) {
           </div>
         </div>
       </div>
-      <div className="flex gap-2 justify-end">
+      {/* TOTP Settings - only show when editing */}
+      {account && <TotpSettings accountId={account.id} />}
+
+      <div className="flex gap-2 justify-end pt-4">
         <button
           type="button"
           onClick={onCancel}
